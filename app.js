@@ -3,125 +3,96 @@ require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
 const ffmpeg = require("fluent-ffmpeg");
+const fs = require("fs");
+const path = require("path");
 const axios = require("axios");
+const FormData = require("form-data");
+
 const app = express();
+const upload = multer({ dest: "uploads/" });
+const maxSegmentSize = 25 * 1024 * 1024; // 25 MB
 
-const PORT = process.env.PORT || 3000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+async function sendAudioToApi(filePath) {
+  const formData = new FormData();
+  formData.append("file", fs.createReadStream(filePath));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static("public"));
-
-const storage = multer.memoryStorage();
-const upload = multer({
-  storage: storage,
-  fileFilter: function (req, file, callback) {
-    const ext = file.mimetype.split("/")[0];
-    if (ext !== "audio" && ext !== "video") {
-      return callback(new Error("Only audio and video files are allowed"));
-    }
-    callback(null, true);
-  },
-});
-
-app.post("/upload", upload.single("media"), async (req, res, next) => {
-  try {
-    const { buffer, mimetype } = req.file;
-
-    // Extract audio from the media file
-    const audio = await extractAudio(buffer, mimetype);
-
-    // Split the audio into 10-second chunks
-    const chunks = splitAudio(audio, 10);
-
-    // Send each chunk to the API and collect the responses
-    const responses = await Promise.all(chunks.map(sendToAPI));
-
-    // Combine the responses into a single object
-    const combined = responses.reduce(
-      (acc, curr) => {
-        acc.transcriptions.push(...curr.transcriptions);
-        acc.errors.push(...curr.errors);
-        return acc;
-      },
-      { transcriptions: [], errors: [] }
-    );
-
-    res.json(combined);
-  } catch (err) {
-    next(err);
-  }
-});
-
-function extractAudio(buffer, mimetype) {
-  return new Promise((resolve, reject) => {
-    const command = ffmpeg(buffer)
-      .format("wav")
-      .noVideo()
-      .audioChannels(1)
-      .audioFrequency(16000);
-
-    command
-      .output("-")
-      .on("end", (stdout) => {
-        resolve(stdout);
-      })
-      .on("error", (err) => {
-        reject(err);
-      })
-      .run();
-  });
-}
-
-function splitAudio(audio, chunkSize) {
-  const chunks = [];
-  const totalDuration = ffmpeg.ffprobe(audio).format.duration;
-  for (let i = 0; i < totalDuration; i += chunkSize) {
-    const start = i;
-    const end = Math.min(i + chunkSize, totalDuration);
-    const duration = end - start;
-    const chunk = ffmpeg(audio)
-      .setStartTime(start)
-      .setDuration(duration)
-      .format("wav")
-      .noVideo()
-      .audioChannels(1)
-      .audioFrequency(16000)
-      .output("-")
-      .pipe();
-    chunks.push(chunk);
-  }
-  return chunks;
-}
-
-async function sendToAPI(chunk) {
-  try {
-    const config = {
+  const response = await axios.post(
+    "https://api.openai.com/v1/audio/transcriptions",
+    formData,
+    {
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "multipart/form-data",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        ...formData.getHeaders(),
       },
-    };
+    }
+  );
 
-    const response = axios
-      .post("https://api.openai.com/v1/audio/transcriptions", form, config)
-      .then((response) => {
-        console.log(response.data);
-      })
-      .catch((error) => {
-        console.error(error);
-      });
-
-    const { text: transcriptions } = response.data;
-    return { transcriptions, errors: [] };
-  } catch (err) {
-    const message = err.response?.data?.message || err.message;
-    const error = { message, chunk };
-    return { transcriptions: [], errors: [error] };
-  }
+  return response.data.transcript;
 }
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+app.post("/upload", upload.single("file"), (req, res) => {
+  const inputFile = req.file.path;
+  const fileExtension = path.extname(req.file.originalname);
+  const outputDir = `output/${req.file.filename}`;
+  const audioOutput = `${outputDir}/audio${fileExtension}`;
+
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  ffmpeg(inputFile)
+    .outputOptions("-vn")
+    .save(audioOutput)
+    .on("end", () => {
+      ffmpeg.ffprobe(audioOutput, (err, metadata) => {
+        if (err) {
+          console.error("Error during ffprobe:", err);
+          res.sendStatus(500);
+          return;
+        }
+
+        const duration = metadata.streams[0].duration;
+        const segmentDuration = Math.min(
+          10,
+          (maxSegmentSize / req.file.size) * duration
+        );
+
+        let counter = 0;
+        ffmpeg(audioOutput)
+          .outputOptions([
+            `-f segment`,
+            `-segment_time ${segmentDuration}`,
+            `-c copy`,
+          ])
+          .save(`${outputDir}/segment%03d${fileExtension}`)
+          .on("end", async () => {
+            const segmentFiles = fs
+              .readdirSync(outputDir)
+              .filter((file) => file.startsWith("segment"));
+
+            let combinedTranscript = "";
+            for (const segmentFile of segmentFiles) {
+              const transcript = await sendAudioToApi(
+                `${outputDir}/${segmentFile}`
+              );
+              combinedTranscript += transcript;
+            }
+
+            fs.writeFileSync(`${outputDir}/transcript.txt`, combinedTranscript);
+            res.send("Audio processed, split, and transcribed successfully.");
+          })
+          .on("error", (err) => {
+            console.error("Error during processing:", err);
+            res.sendStatus(500);
+          });
+      });
+    })
+    .on("error", (err) => {
+      console.error("Error during audio extraction:", err);
+      res.sendStatus(500);
+    });
+});
+
+app.listen(3000, () => {
+  console.log("Server is running on port 3000");
 });
