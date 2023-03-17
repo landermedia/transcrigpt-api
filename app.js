@@ -15,6 +15,7 @@ const maxSegmentSize = 25 * 1024 * 1024; // 25 MB
 async function sendAudioToApi(filePath) {
   const formData = new FormData();
   formData.append("file", fs.createReadStream(filePath));
+  formData.append("model", "whisper-1");
 
   const response = await axios.post(
     "https://api.openai.com/v1/audio/transcriptions",
@@ -27,7 +28,11 @@ async function sendAudioToApi(filePath) {
     }
   );
 
-  return response.data.transcript;
+  console.log(
+    "🚀 ~ file: app.js:33 ~ sendAudioToApi ~ response.data:",
+    response.data
+  );
+  return response.data.text;
 }
 
 app.post("/upload", upload.single("file"), (req, res) => {
@@ -78,8 +83,8 @@ app.post("/upload", upload.single("file"), (req, res) => {
               combinedTranscript += transcript;
             }
 
-            fs.writeFileSync(`${outputDir}/transcript.txt`, combinedTranscript);
-            res.send("Audio processed, split, and transcribed successfully.");
+            // fs.writeFileSync(`${outputDir}/transcript.txt`, combinedTranscript);
+            res.status(200).json({ data: combinedTranscript });
           })
           .on("error", (err) => {
             console.error("Error during processing:", err);
