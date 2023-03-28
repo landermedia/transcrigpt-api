@@ -8,8 +8,12 @@ const path = require("path");
 const axios = require("axios");
 const FormData = require("form-data");
 const tmp = require("tmp");
+const cors = require("cors");
 
 const app = express();
+
+app.use(cors());
+
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
@@ -33,6 +37,7 @@ const upload = multer({
     }
   },
 });
+
 const currentDirectory = process.cwd();
 
 async function sendAudioToApi(filePath) {
@@ -305,6 +310,6 @@ app.post("/upload222", upload.single("file"), (req, res) => {
     });
 });
 
-app.listen(3000, () => {
-  console.log("Server is running on port 3000");
+app.listen(9000, () => {
+  console.log("Server is running on port 9000");
 });
